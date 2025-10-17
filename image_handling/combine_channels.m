@@ -1,38 +1,305 @@
-function [combined_images] = combine_channels(images,noise)
+function [combined_images] = combine_channels(images,opts,obj)
 %multicoil reconstruction
 %   Detailed explanation goes here
-% 
-% noise = reshape(noise,numel(noise)/2, 2);
-% noise = permute(noise,[2 1]);
-% M = size(noise,2);
-% Rn = (1/(M-1))*(noise*noise');
-% Bn = (mean(abs(noise(:)))^2)./abs(noise(length(noise)./2))^2;
-% Rnscaled = (Rn);
+
+tic
+tempdim = size(images);
+
+images = reshape(images,[tempdim(1),tempdim(2),obj.slices,obj.n_timepoints,obj.n_fieldpoints,obj.n_receivers]); % old debug code, enforce a specific dimensionality (with singletons if needed)
+
+images_temp = reshape(images,tempdim(1),tempdim(2),[],obj.n_receivers); %reduce everything to 4 dimensions (X,Y, everything else, number of receivers).
 
 
-eta = noise;
+switch opts
+    case 1
+        n_channels = size(images_temp,4);
+        if n_channels >1
+            for s=1:size(images_temp,3)
+                
+                psi = [n_channels,n_channels];
+                dims = size(images_temp);
+                channel_data = reshape(images_temp(:,:,s,:),[],n_channels);          %make everything into a vector so we don't have to worry about every possible combination of slices, echoes etc
+                eta1 = (images_temp(:,:,s,:));
+                eta = squeeze(eta1(1,:,1,:))'; %Assume the first line of k-space is mostly noise. Almost universally the case at 0.2T.
+                psi = (1/(length(eta)-1))*(eta*eta');
+                try
+                    L = chol(psi,'lower');
+                    L_inv =inv(L);
+                catch
+                    L_inv =1; %This usually indicates something bad has happened but prevents complete failure
+                end
+                %                             L_inv =1;
+               
+                data_scaled = ((L_inv)*(permute(channel_data,[2 1]))); %scale the data depending on the noise figure from each element.
+                
+                channel_data = reshape(data_scaled',tempdim(1),tempdim(2),[]);     
+              combined_images(:,:,s) = sqrt(sum(channel_data.*conj(channel_data),3)); %equivilent to rssq() I think. Tutorial is explicit about using the conjugate for reasons I don't understand
+              
+              
+          
+              
+        %      combined_images(:,:,s) = CorrelatedNoiseWSos(squeeze(coilImagesReduced(:,:,s,:)));
+            end
+            
+            combined_images = reshape(combined_images,[tempdim(1),tempdim(2),obj.slices,obj.n_timepoints,obj.n_fieldpoints]); %put everything back to its original dimensionality.
+            
+        else
+            combined_images = mean(images,6); %If something is wrong and we reach this point, just average over the multicoil dimension.
+        end
+    case 2
+        combined_images = mean(images,6); %User has selected to average over the multicoil data. Not usually a good idea but useful in particular conditions.
+    otherwise
+        combined_images = images(:,:,:,:,:,opts-2); %displays the individual channel data for debugging purposes.
+        
+        
+end
 
-n_channels = size(images,6);
-psi = [n_channels,n_channels];
-dims = size(images);
-channel_data = (reshape(images,[],n_channels));
-psi = (1/(length(noise)-1))*(eta*eta');
-L = chol(psi,'lower');
-L_inv =inv(L);
-%  L_inv =1;
-data_scaled = (L_inv*permute(channel_data,[2 1]));
-channel_data = reshape(data_scaled',dims);
-% channel_data(:,:,:,1) = 0;
-% channel_data(:,:,:,2) = 0;
-% channel_data(:,:,:,3) = 0;
-% channel_data(:,:,:,4) = 0;
-% channel_data(:,:,:,5) = 0;
-% channel_data(:,:,:,6) = 0;
-combined_images = sqrt(sum(channel_data.*conj(channel_data),6));
+    function S = adaptive_est_sens(data) %adapted from Oxford SENSE tutorial based on Walsh et al for testing purposes.
+        [Nx,Ny,Nz,Nc] = size(data);
+        S = zeros(Nx,Ny,Nz,Nc);
+        M = zeros(Nx,Ny,Nz);
+        w = 5;
+        
+        for i = 1:Nx
+            ii = max(i-w,1):min(i+w,Nx);
+            for j = 1:Ny
+                jj = max(j-w,1):min(j+w,Ny);
+                for k = 1:Nz
+                    kk = max(k-w,1):min(k+w,Nz);
+                    kernel = reshape(data(ii,jj,kk,:),[],Nc);
+                    [V,D] = eigs(conj(kernel'*kernel),1);
+                    S(i,j,k,:) = V*exp(-1j*angle(V(1)));
+                    M(i,j,k) = sqrt(D);
+                end
+            end
+        end
+        
+        %      S = S.*(M>0.1*max(abs(M(:))));
+    end
+
+    function reconOpt = CorrelatedNoiseWSos(coilImages, noiseImages, noiseMask)
+        % correlatedNoiseWSoS - Performs multi-coil MRI reconstruction using a 
+%                       correlated-noise weighted sum of squares (wSoS).
+%
+%   reconOpt = correlatedNoiseWSoS(coilImages, noiseImages, noiseMask)
+%
+%   Inputs:
+%       coilImages  - [Nx, Ny, Ncoils] array of complex coil images.
+%                     These are typically Fourier-reconstructed images 
+%                     from each coil.
+%
+%       noiseImages - (Optional) Either the same size as coilImages 
+%                     (if you have separate noise scans) OR a smaller 
+%                     set of noise-only samples from each coil. 
+%                     e.g. [NxNoise, NyNoise, Ncoils], or even a 
+%                     2D matrix of dimension [Nsamples, Ncoils].
+%                     If empty, we attempt to infer noise from coilImages
+%                     background.
+%
+%       noiseMask   - (Optional) [Nx, Ny] logical mask indicating which 
+%                     pixels (in noiseImages or coilImages) are 
+%                     noise-only. If empty or not provided, a simple 
+%                     threshold-based mask is created automatically.
+%
+%   Output:
+%       reconOpt    - [Nx, Ny] array of the combined image using the 
+%                     correlated noise weighting (aka 'optimal' coil combination).
+%
+%   Example usage:
+%       >> load exampleMultiCoilData.mat  % coilImages in workspace
+%       >> % Suppose we have noise-only region or a separate noise scan
+%       >> noiseMask = myNoiseMask;       % Nx-by-Ny logical
+%       >> reconOpt = correlatedNoiseWSoS(coilImages, [], noiseMask);
+%       >> figure; imagesc(abs(reconOpt)); axis image off; colormap gray;
+%       >> title('Correlated-Noise Weighted SoS');
+%
+%   (c) 2025 Example Author - Provided as illustrative code.
+
+    if nargin < 2, noiseImages = []; end
+    if nargin < 3, noiseMask   = []; end
+
+    %----------------------------------------------------------------------
+    % 1) Estimate Noise Covariance
+    %    - If noiseImages are provided, we use them. 
+    %    - Otherwise, we fallback to coilImages and attempt to create
+    %      a noise mask from background.
+    %----------------------------------------------------------------------
+    noiseCov = estimateNoiseCov(coilImages, noiseImages, noiseMask);
+
+    % Invert the covariance
+    invCov = inv(noiseCov);
+
+    %----------------------------------------------------------------------
+    % 2) Form the voxel-by-voxel Weighted SoS recon:
+    %      recon(x,y) = sqrt( I(x,y)^H * invCov * I(x,y) )
+    %----------------------------------------------------------------------
+    [Nx, Ny, Ncoils] = size(coilImages);
+    reconOpt = zeros(Nx, Ny);
+
+    % A simple loop implementation (straightforward but not the fastest):
+    for x = 1:Nx
+        for y = 1:Ny
+            % coil vector for voxel (x,y): dimension [Ncoils, 1]
+            voxelData = squeeze(coilImages(x,y,:));  
+            % Weighted magnitude
+            reconOpt(x,y) = sqrt(conj(voxelData') * invCov * voxelData);
+        end
+    end
+    
+    
+    function noiseCov = estimateNoiseCov(coilImages, noiseImages, noiseMask)
+% estimateNoiseCov - Estimates the coil noise covariance from complex data.
+%                    Computes the Hermitian covariance matrix directly.
+%
+%   noiseCov = estimateNoiseCov(coilImages, noiseImages, noiseMask)
+%
+%   Inputs:
+%     coilImages : [Nx, Ny, Ncoils] complex array (main image data).
+%     noiseImages: (Optional) If provided, same # of coils. Either:
+%                     1) 3D array [NxNoise, NyNoise, Ncoils], or
+%                     2) 2D array [Nsamples, Ncoils].
+%                  If empty, use coilImages as noise data fallback.
+%     noiseMask  : (Optional) [Nx, Ny] logical mask of noise-only pixels
+%                  (ignored if noiseImages is 2D).
+%
+%   Output:
+%     noiseCov   : [Ncoils x Ncoils] Hermitian covariance matrix
+%
+%   This version directly computes the complex covariance (no separate
+%   real/imag block-cov). If you use a mask, it pulls noise-only samples
+%   into a big matrix of shape [nPts, Ncoils], then does:
+%        Cov = (Zc' * conj(Zc)) / (nPts - 1)
+%   where Zc is zero-mean. For purely noise data, subtracting the mean
+%   often does little, but is included here for general correctness.
+
+    [Nx, Ny, Ncoils] = size(coilImages);
+
+    %----------------------------------------------------------------------
+    % 1) If noiseImages are not provided, use coilImages as fallback
+    %----------------------------------------------------------------------
+    if isempty(noiseImages)
+        noiseImages = coilImages;
+    end
+
+    %----------------------------------------------------------------------
+    % 2) If noiseImages is 2D [Nsamples x Ncoils], skip mask approach
+    %----------------------------------------------------------------------
+    dimsNoise = size(noiseImages);
+    if numel(dimsNoise) == 2
+        % Expect shape [Nsamples, Ncoils]
+        if dimsNoise(2) ~= Ncoils
+            error('Mismatch: noiseImages has %d coils, but coilImages has %d coils.', ...
+                  dimsNoise(2), Ncoils);
+        end
+
+        % Z is [Nsamples x Ncoils]
+        Z = noiseImages;   % directly use the complex samples
+
+    else
+        %------------------------------------------------------------------
+        % 3) Otherwise, noiseImages has shape [Nx2, Ny2, Ncoils].
+        %    Use noiseMask (or create default) to pick noise-only samples.
+        %------------------------------------------------------------------
+        if size(noiseImages,3) ~= Ncoils
+            error('Mismatch in #coils between coilImages and noiseImages.');
+        end
+
+        if (nargin < 3) || isempty(noiseMask)
+            noiseMask = createDefaultNoiseMask(noiseImages); 
+        end
+
+        % Collect noise data from each coil in the masked region
+        maskInds = find(noiseMask);
+        nPts     = length(maskInds);
+
+        Z = zeros(nPts, Ncoils, 'like', noiseImages);  % same complex type
+        for c = 1:Ncoils
+            coilData = noiseImages(:,:,c);
+            Z(:, c) = coilData(maskInds);  % gather noise samples from this coil
+        end
+    end
+
+    %----------------------------------------------------------------------
+    % 4) Compute the Hermitian covariance
+    %    a) Subtract mean from each coil channel (often near zero anyway).
+    %    b) Cov = (Zc' * conj(Zc)) / (nPts - 1).
+    %----------------------------------------------------------------------
+    nSamples = size(Z,1);
+
+    % Subtract mean from each column
+    meanVals = mean(Z,1);                 % 1 x Ncoils
+    Zc       = Z - repmat(meanVals, nSamples, 1); 
+
+    % Compute complex covariance
+    noiseCov = (Zc' * conj(Zc)) / (nSamples - 1);
+
+    %  noiseCov should be [Ncoils x Ncoils], Hermitian (symmetric if real).
+end
+
+        function noiseMask = createDefaultNoiseMask(inputImages)
+% createDefaultNoiseMask - Creates a mask of the first 2 rows across all columns.
+%
+%   noiseMask = createDefaultNoiseMask(inputImages)
+%
+%   In this version, we set rows 1 and 2 (if Nx >= 2) to "true" (noise region),
+%   and the rest to "false." If the image has only 1 row (very unusual),
+%   then only that row is used.
+
+    [Nx, Ny, ~] = size(inputImages);
+
+    % Initialize the mask to all false
+    noiseMask = false(Nx, Ny);
+
+    % If we have at least 2 rows, set them true
+    if Nx >= 2
+        noiseMask(120:128, :) = true;
+    else
+        % Edge case if there's only 1 row
+        noiseMask(1, :) = true;
+    end
+end
+
+function Cc = realImagCov2ComplexCov(R)
+% realImagCov2ComplexCov - Converts [2*N x 2*N] real-imag covariance 
+%                          matrix into an [N x N] complex covariance matrix.
+%
+%   If we have the partitioned covariance:
+%
+%       R = [ Cov(Re,Re)    Cov(Re,Im)
+%             Cov(Im,Re)    Cov(Im,Im) ]
+%
+%   Then the corresponding complex covariance matrix is:
+%
+%       Cc = Cov(X, X^*) = Cov(Re(X)+1j*Im(X), Re(X)-1j*Im(X))
+%
+%   Implementation adapted from typical MRI literature.
+
+    % R is dimension [2N x 2N]
+    N = size(R,1)/2;
+    if (N ~= round(N)) || (size(R,1) ~= size(R,2))
+        error('R must be 2N-by-2N for some integer N');
+    end
+
+    Rrr = R(         1:N,          1:N);  % Cov(Re, Re)
+    Rri = R(         1:N,     N+1:2*N);   % Cov(Re, Im)
+    Rir = R(    N+1:2*N,          1:N);   % Cov(Im, Re)
+    Rii = R(    N+1:2*N,     N+1:2*N);    % Cov(Im, Im)
+
+    % Combine into complex covariance:
+    %   Cc = Rrr + j*Rri - j*Rir + Rii * (-1)^2 ?
+    % Carefully follow the definitions: 
+    %   Let X = Re(X) + i Im(X).
+    %   Cov(X, X^*) = E[ (Re(X) + i Im(X)) (Re(X) - i Im(X))^T ] ...
+    % which ends up at:
+    %   Cc = Rrr + Rii + i(Rri - Rir)
+
+    realPart = Rrr + Rii; 
+    imagPart = Rri - Rir;   % This should be symmetrical if noise is properly acquired
+    Cc       = realPart + 1i*imagPart;
+end
 
 
-% for n=1:size(images,6)
-% coil_images(:,:,:,n) = coil_images(:,:,:,n).*(noise(1)./noise(n));
-% end
-% 
-% combined_images = sqrt(sum(coil_images.*conj(coil_images),4));
+end
+
+end
+
