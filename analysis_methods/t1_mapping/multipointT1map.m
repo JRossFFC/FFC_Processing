@@ -19,9 +19,9 @@ if isempty(mask)
     mask = ones(size(imagestack,1),size(imagestack,2));
 end
 
-% for n=1:size(imagestack,3)
-% %  imagestack(:,:,n) = imgaussfilt(imagestack(:,:,n));
-% end
+ for n=1:size(imagestack,3)
+   imagestack(:,:,n) = imgaussfilt(imagestack(:,:,n));
+ end
 
 T1map = T1ScanExperiment(imagestack,extra, method,mask,checkfit);
 

@@ -324,7 +324,7 @@ classdef ImageReconCore
                 obj.thk = fid.par.cameleon.SLICE_THICKNESS*1000;
                 obj.resolution_inplane = fid.par.cameleon.RESOLUTION_FREQUENCY;
                 obj.resolution_throughplane = obj.thk;
-                obj.sequence = fid.par.serieName;
+                obj.sequence = fid.par.serie;
                 obj.partialkspace =0;
                 if fid.par.cameleon.USER_ZERO_FILLING_2D ~=0
                     obj.partialkspace =0;
@@ -824,7 +824,7 @@ signal = signaltt';
                 xlabel('Evolution Field (MHz)')
                 ylabel('R_1 (s^-^1)');
             else
-                disp(['Fields (T): ' num2str(fields)])
+                disp(['Fields (T): ' num2str(fields')])
                 disp(['T1 (ms): ' num2str(T1dispersion)])
                 disp(['Error:' num2str(error)]);
                 figure,plot(fields(1:n_fields(1)),T1dispersion,'o');
